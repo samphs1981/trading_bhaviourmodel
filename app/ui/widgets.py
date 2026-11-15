@@ -152,7 +152,7 @@ class SecurityPicker(QWidget):
 
 # ---------- behaviour switches and profile editor ----------
 class SwitchBoxes(QWidget):
-    """The four open-position behaviours as independent checkboxes."""
+    """The extra behaviours as independent checkboxes."""
     changed = Signal()
 
     def __init__(self, parent=None):
@@ -160,7 +160,7 @@ class SwitchBoxes(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         self.boxes = {}
-        for key, label, tip in engine.SWITCHES:
+        for key, label, tip in engine.ALL_SWITCHES:
             box = QCheckBox(label)
             box.setToolTip(tip[0].upper() + tip[1:])
             box.toggled.connect(lambda *_: self.changed.emit())

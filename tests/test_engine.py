@@ -66,7 +66,10 @@ def test_equivalence_with_reference(preset, switches):
 
 
 # ---------- 2. day-by-day equals batch ----------
-@pytest.mark.parametrize('switches', SWITCH_SETS, ids=lambda s: '+'.join(s) or 'plain')
+NEW_SETS = [dict(break_even=True), dict(top_up=True), {k: True for k, _, _ in engine.ALL_SWITCHES}]
+
+
+@pytest.mark.parametrize('switches', SWITCH_SETS + NEW_SETS, ids=lambda s: '+'.join(s) or 'plain')
 def test_day_by_day_equals_batch(switches):
     for preset, start in itertools.product(engine.PRESETS, STARTS[:3]):
         prof = preset.with_switches(**switches)
@@ -244,3 +247,133 @@ def test_opposite_of_a_losing_long_wins():
     combined = next(r for r in rep['results'] if r['name'] == 'All combined')
     assert combined['wiped'] and combined['opp_final'] == pytest.approx(2.0, abs=0.05)   # wiped out -> about double
     assert combined['opp_dd'] <= 0
+
+
+# ---------- behaviours added in the app (not in the reference) ----------
+def test_new_behaviours_off_by_default():
+    assert not any(getattr(p, k) for p in engine.PRESETS for k, _, _ in engine.NEW_SWITCHES)
+
+
+def test_break_even_closes_a_recovered_loser():
+    prof = engine.Profile('t', .05, .10, 1, break_even=True)
+    st = engine.TraderState()
+    engine.open_trade(st, prof, 100.0, 'long', 'd0')
+    assert [e.kind for e in engine.step(st, prof, 100.0, 100.4, 'd1')] == [engine.HOLD]     # up a little, never down: stay
+    assert [e.kind for e in engine.step(st, prof, 100.4, 98.5, 'd2')] == [engine.HOLD]      # down 1.5%: now armed
+    assert [e.kind for e in engine.step(st, prof, 98.5, 99.5, 'd3')] == [engine.HOLD]       # still under water
+    ev = engine.step(st, prof, 99.5, 100.1, 'd4')                                           # back to entry: out
+    assert (ev[0].kind, ev[0].reason) == (engine.CLOSE, engine.BREAK_EVEN)
+    assert st.position is None and st.history[-1].move == pytest.approx(0.001)
+    # the same path without the habit keeps holding
+    plain = engine.Profile('t', .05, .10, 1)
+    st2 = engine.TraderState()
+    engine.open_trade(st2, plain, 100.0, 'long', 'd0')
+    for prev, c in ((100.0, 100.4), (100.4, 98.5), (98.5, 99.5), (99.5, 100.1)):
+        engine.step(st2, plain, prev, c)
+    assert st2.position is not None
+
+
+def test_target_still_wins_over_break_even():
+    prof = engine.Profile('t', .01, .10, 1, break_even=True)
+    st = engine.TraderState()
+    engine.open_trade(st, prof, 100.0, 'long')
+    engine.step(st, prof, 100.0, 98.0)
+    assert engine.step(st, prof, 98.0, 101.5)[0].reason == engine.TARGET
+
+
+def test_top_up_deposits_then_stops():
+    prof = engine.Profile('t', .50, None, 5, top_up=True)
+    st = engine.TraderState(start=10_000.0, account=10_000.0)
+    left = []
+    for n in range(engine.MAX_TOPUPS + 1):
+        engine.open_trade(st, prof, 100.0, 'long', f'd{n}')
+        kinds = [e.kind for e in engine.step(st, prof, 100.0, 80.0, f'e{n}')]              # -20% at 5x: wiped out
+        left.append(st.history[-1].account_after)
+        if n < engine.MAX_TOPUPS:
+            assert kinds == [engine.MARGIN_CALL, engine.CLOSE, engine.TOP_UP] or kinds == [engine.CLOSE, engine.TOP_UP]
+            assert not st.stopped and st.account == pytest.approx(left[-1] + 10_000.0)
+        else:
+            assert kinds[-1] == engine.STOP_TRADING and st.stopped                         # no deposits left
+    assert st.topups == engine.MAX_TOPUPS and st.total_in == 30_000.0
+
+
+def test_chase_direction_follows_the_last_three_days():
+    closes = [100, 101, 102, 103, 99, 98, 97, 104]
+    assert [engine.chase_direction(closes, t) for t in range(8)] == [-1, -1, -1, 1, -1, -1, -1, 1]
+    daily, trades = engine.replay(CLOSES, STARTS[1], 1, engine.PRESETS[0], 'chase', 252)
+    for t in trades[1:]:
+        assert t.direction == engine.chase_direction(CLOSES, t.entry_index)
+
+
+def test_report_result_counts_top_up_deposits():
+    start = DATES.index('2025-02-18')
+    profs = [ALL_COMBINED.with_switches(top_up=True)]
+    r = engine.run_report(CLOSES, DATES, start, 'long', 'same', 252, profs)['results'][0]
+    assert r['deposited'] > 0
+    assert r['result'] == pytest.approx(r['final'] / (1 + r['deposited']) - 1)
+
+
+# ---------- Signal must equal the Report backtest ----------
+FOLLOW_RULES = ['same', 'trend', 'chase', 'random_one']
+
+
+@pytest.mark.parametrize('rule', FOLLOW_RULES)
+@pytest.mark.parametrize('switches', [{}, {k: True for k in SWITCH_KEYS}, {k: True for k, _, _ in engine.ALL_SWITCHES}],
+                         ids=['plain', 'four-extras', 'all-extras'])
+def test_signal_followed_daily_equals_report_backtest(rule, switches):
+    """Run the Signal one session at a time (and in uneven batches) for a year: same trades and account as the Report."""
+    account = 10_000.0
+    for preset, start, side, trader in itertools.product(engine.PRESETS, STARTS[:3], (1, -1), (1, 7)):
+        prof = preset.with_switches(**switches)
+        end = start + 251
+        rep = engine.run_report(CLOSES, DATES, start, side, rule, 252, [prof], trader=trader)['results'][0]
+        follow = dict(rule=rule, first_direction=side, trader=trader)
+        for jumps in ((1,), (1, 4, 2, 9)):
+            st = engine.TraderState(start=account, account=account)
+            engine.open_trade(st, prof, CLOSES[start], side, DATES[start])
+            cut = start + 1
+            for jump in itertools.cycle(jumps):
+                cut = min(cut + jump, end + 1)
+                engine.process_sessions(st, prof, ROWS[:cut], follow)
+                if cut == end + 1:
+                    break
+            where = f'{prof.name} {rule} start={start} side={side} trader={trader} jumps={jumps}'
+            model = rep['trades']
+            # On the backtest's final day the Report labels whatever is open "end of period". If that day is also a
+            # margin call, the Signal books the margin call: same day, same close, same account.
+            margin_at_end = bool(model[-1].reason == engine.END and st.history and st.history[-1].reason == engine.MARGIN
+                                 and st.history[-1].exit_date == DATES[end])
+            still_open = model[-1].reason == engine.END and not margin_at_end
+            closed = model[:-1] if still_open else model
+            assert len(st.history) == len(closed), where
+            for mine, theirs in zip(st.history, closed):
+                reason = engine.MARGIN if (theirs.reason == engine.END and margin_at_end) else theirs.reason
+                assert (mine.entry_date, mine.exit_date, mine.direction, mine.reason, mine.lots) == \
+                       (theirs.entry_date, theirs.exit_date, theirs.direction, reason, theirs.lots), where
+                assert mine.account_after == pytest.approx(theirs.account_after * account, rel=1e-9), where
+            # what is left open in the Signal is the trade the Report closes as "end of period"
+            if still_open:
+                assert st.position is not None and st.position.entry_date == model[-1].entry_date, where
+                cost = 2 * engine.COST * model[-1].size * model[-1].account_before * account
+                assert engine.mark_to_market(st) - cost == pytest.approx(rep['final'] * account, rel=1e-9, abs=1e-6), where
+            else:
+                assert st.account == pytest.approx(rep['final'] * account, rel=1e-9), where
+            ok, message = engine.check_alignment(st, prof, ROWS[:end + 1], follow)
+            assert ok, f'{where}: {message}'
+
+
+def test_alignment_check_catches_a_tampered_history():
+    prof = ALL_COMBINED
+    start = DATES.index('2025-02-18')
+    follow = dict(rule='same', first_direction=1, trader=1)
+    st = engine.TraderState(start=10_000.0, account=10_000.0)
+    engine.open_trade(st, prof, CLOSES[start], 1, DATES[start])
+    engine.process_sessions(st, prof, ROWS[:start + 20], follow)
+    assert engine.check_alignment(st, prof, ROWS[:start + 20], follow)[0] is True
+    st.history[1].account_after += 1.0
+    ok, message = engine.check_alignment(st, prof, ROWS[:start + 20], follow)
+    assert ok is False and 'Trade 2 differs' in message
+    # revised price history is caught too
+    st.history[1].account_after -= 1.0
+    revised = [(d, c * (1.01 if d == st.history[0].exit_date else 1)) for d, c in ROWS[:start + 20]]
+    assert engine.check_alignment(st, prof, revised, follow)[0] is False

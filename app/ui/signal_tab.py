@@ -5,7 +5,7 @@ import html
 
 import pyqtgraph as pg
 from PySide6.QtCore import QDate, Qt, QTimer
-from PySide6.QtWidgets import (QComboBox, QDateEdit, QDoubleSpinBox, QFormLayout, QFrame, QGroupBox, QHBoxLayout,
+from PySide6.QtWidgets import (QComboBox, QDateEdit, QDoubleSpinBox, QSpinBox, QFormLayout, QFrame, QGroupBox, QHBoxLayout,
                                QLabel, QLineEdit, QMessageBox, QPushButton, QStackedWidget, QVBoxLayout, QWidget)
 
 from .. import data, engine
@@ -14,6 +14,11 @@ from .widgets import (ProfileEditor, SecurityPicker, disclaimer_label, fill_tabl
                       price_text, run_async, set_dates, side_text, theme)
 
 FLAT_CHART_DAYS = 60
+FOLLOW = [('same', 'Same side as my first entry'), ('trend', 'Follow the 20-day trend'),
+          ('chase', f'Chase the last {engine.CHASE_DAYS} days'), ('random_one', 'Random long/short (trader number below)'),
+          ('manual', 'I choose every entry myself (cannot be checked against the model)')]
+FOLLOW_TEXT = {'same': 'same side as the first entry', 'trend': 'the 20-day trend', 'chase': f'the last {engine.CHASE_DAYS} days',
+               'random_one': 'random long/short'}
 
 
 def close_detail(ev: engine.Event, profile: engine.Profile) -> str:
@@ -26,6 +31,7 @@ def close_detail(ev: engine.Event, profile: engine.Profile) -> str:
         engine.STOP: f'down {-r:.2%}, stop is -{(d["stop"] or 0):.2%}',
         engine.TIME: f'held {engine.MAX_HOLD} trading days',
         engine.MARGIN: 'account marked to market is at or below 20% of its starting value',
+        engine.BREAK_EVEN: f'was down {-d.get("trough", 0):.2%}, now back to {r:+.2%}',
     }.get(ev.reason, '')
 
 
@@ -44,6 +50,12 @@ def event_text(ev: engine.Event, profile: engine.Profile) -> str:
     if ev.kind == engine.CLOSE:
         label = engine.reason_label(ev.reason, d.get('stop_moved', False))
         return f'<b>CLOSE</b>. {label}: {close_detail(ev, profile)}. Closed at {price_text(d["close"])}.'
+    if ev.kind == engine.OPEN:
+        return (f'<b>RE-ENTER {side_text(d["direction"]).upper()}</b>. The model opens its next trade at that close, '
+                f'{price_text(d["price"])}: {d["base"]:g}x account ({money(d["value"])}).')
+    if ev.kind == engine.TOP_UP:
+        return (f'<b>TOP UP</b>. The account was wiped out ({money(d["left"], True)} left). The model deposits another '
+                f'{money(d["deposit"], True)} (top-up {d["number"]} of {engine.MAX_TOPUPS}) and carries on with {money(d["account"], True)}.')
     if ev.kind == engine.STOP_TRADING:
         return '<b>STOP TRADING</b>. Account is at or below 20% of its starting value.'
     return ''
@@ -92,6 +104,17 @@ class SignalTab(QWidget):
         form.addRow('Starting account', self.setup_start)
         form.addRow('Security', self.setup_security)
         form.addRow(self.setup_profile)
+        self.setup_follow = QComboBox()
+        for key, label in FOLLOW:
+            self.setup_follow.addItem(label, key)
+        self.setup_follow.setToolTip('The model re-enters at the close of the day a trade ends. With any rule except the last, '
+                                     'the Signal does the same automatically, so it matches a Report backtest exactly.')
+        self.setup_trader = QSpinBox(minimum=1, maximum=engine.MC_RUNS, value=1)
+        self.setup_trader.setEnabled(False)
+        self.setup_follow.currentIndexChanged.connect(
+            lambda *_: self.setup_trader.setEnabled(self.setup_follow.currentData() == 'random_one'))
+        form.addRow('Later trades', self.setup_follow)
+        form.addRow('Trader number', self.setup_trader)
         form.addRow(self.setup_error)
         form.addRow(start_btn)
         box.setMaximumWidth(620)
@@ -176,6 +199,10 @@ class SignalTab(QWidget):
         ml.addWidget(self.error)
         ml.addWidget(self.open_box)
         ml.addWidget(self.stats)
+        self.align = QLabel('')
+        self.align.setWordWrap(True)
+        self.align.setTextFormat(Qt.RichText)
+        ml.addWidget(self.align)
         ml.addWidget(self.chart_title)
         ml.addWidget(self.plot, 3)
         ml.addWidget(hist_title)
@@ -207,7 +234,8 @@ class SignalTab(QWidget):
         try:
             csv_path = self.setup_security.csv_path()
             symbol = self.setup_security.display_name() if csv_path else self.setup_security.symbol()
-            self.doc = state_io.new_doc(self.setup_start.value(), symbol, self.setup_profile.profile(), csv_path)
+            self.doc = state_io.new_doc(self.setup_start.value(), symbol, self.setup_profile.profile(), csv_path,
+                                        self.setup_follow.currentData(), self.setup_trader.value())
         except ValueError as ex:
             self.setup_error.setText(str(ex))
             return
@@ -262,7 +290,7 @@ class SignalTab(QWidget):
         self.series = series
         self._error(series.note)
         before = self.doc.trader.last_date
-        engine.process_sessions(self.doc.trader, self.doc.profile, series.rows)
+        engine.process_sessions(self.doc.trader, self.doc.profile, series.rows, self.doc.follow())
         self._save()
         latest = series.rows[-1][0]
         self.status_message(f'Latest completed session: {latest}.' + ('' if before != latest else ' Nothing new to apply.'))
@@ -286,13 +314,16 @@ class SignalTab(QWidget):
                 price = float(text) if text else closes[date]
             except ValueError:
                 raise ValueError(f'"{text}" is not a price. Leave it blank to use the close of {date}.') from None
+            first_trade = not tr.history
             engine.open_trade(tr, self.doc.profile, price, self.open_side.currentData(), date)
+            if first_trade:
+                self.doc.first_direction = tr.position.direction       # the model's later sides are measured from this
         except ValueError as ex:
             self._error(str(ex))
             return
         self._error(self.series.note)
         self.open_price.clear()
-        engine.process_sessions(tr, self.doc.profile, self.series.rows)   # entry before the latest session: catch up now
+        engine.process_sessions(tr, self.doc.profile, self.series.rows, self.doc.follow())   # entry before the latest session: catch up now
         self._save()
         self._render()
 
@@ -309,7 +340,8 @@ class SignalTab(QWidget):
             latest = 'prices not loaded yet'
         src = ' (from CSV file)' if doc.csv_path else (' (live from Yahoo Finance)' if self.series and self.series.source == 'yahoo'
                                                        else (' (saved prices, Yahoo not reached)' if self.series else ''))
-        self.context.setText(f'<b>{e(prof.name)}</b> ({e(prof.describe())}) · {e(name)}{src} · {latest}')
+        rule = dict(FOLLOW)[doc.follow_rule].split(' (')[0] + (f', trader {doc.trader_number}' if doc.follow_rule == 'random_one' else '')
+        self.context.setText(f'<b>{e(prof.name)}</b> ({e(prof.describe())}) · later trades: {e(rule.lower())} · {e(name)}{src} · {latest}')
 
         events = tr.last_events
         close_ev = next((ev for ev in events if ev.kind == engine.CLOSE), None)
@@ -320,7 +352,22 @@ class SignalTab(QWidget):
             add = next((ev for ev in today if ev.kind == engine.ADD_LOT), None)
             wid = next((ev for ev in today if ev.kind == engine.STOP_WIDENED), None)
             n, move = len(pos.lots), engine.current_move(pos)
-            if add:
+            reopened = next((ev for ev in today if ev.kind == engine.OPEN), None)
+            closed_today = next((ev for ev in today if ev.kind == engine.CLOSE), None)
+            if reopened and closed_today:
+                d = closed_today.data
+                head, accent = f'CLOSE, THEN RE-ENTER {side_text(pos.direction).upper()}', t['critical']
+                label = engine.reason_label(closed_today.reason, d.get('stop_moved', False))
+                lines.append(f'<b>{label}</b>: {close_detail(closed_today, prof)}. Close at {price_text(d["close"])}. '
+                             f'Account is now <b>{money(d["account_after"], True)}</b> (was {money(d["account_before"], True)}).')
+                top = next((ev for ev in today if ev.kind == engine.TOP_UP), None)
+                if top:
+                    lines.append(f'<b>Top up:</b> that is a wipe-out, so the model deposits another {money(top.data["deposit"], True)} '
+                                 f'(top-up {top.data["number"]} of {engine.MAX_TOPUPS}); account {money(top.data["account"], True)}.')
+                lines.append(f'<b>Then open the next trade at the same close</b>, as the model does '
+                             f'({FOLLOW_TEXT.get(doc.follow_rule, "")}): {side_text(pos.direction).lower()}, '
+                             f'{e(engine.sizing_note(tr, prof))}.')
+            elif add:
                 head, accent = 'ADD TO POSITION', t['warning']
                 d = add.data
                 lines.append(f'Averaging down: the close is {-d["first_move"]:.2%} against the first entry. Add another lot of '
@@ -356,6 +403,11 @@ class SignalTab(QWidget):
                     lines.append(f'<b>This triggered on {close_ev.date}, before the latest session ({tr.last_date})</b>; '
                                  f'the model books it at that day\'s close.')
                 lines.append(f'Account is now <b>{money(d["account_after"], True)}</b> (was {money(d["account_before"], True)}).')
+                top = next((ev for ev in events if ev.kind == engine.TOP_UP), None)
+                if top:
+                    lines.append(f'<b>Top up:</b> that is a wipe-out, so the model deposits another {money(top.data["deposit"], True)} '
+                                 f'(top-up {top.data["number"]} of {engine.MAX_TOPUPS}). Account is now <b>{money(top.data["account"], True)}</b>; '
+                                 f'total money put in {money(top.data["total_in"], True)}.')
                 listed = [ev for ev in events if ev.kind in (engine.ADD_LOT, engine.STOP_WIDENED, engine.MARGIN_CALL)]
             else:
                 head, accent = 'NO OPEN POSITION', t['good']
@@ -372,11 +424,25 @@ class SignalTab(QWidget):
         self.card.setStyleSheet(f'#card {{ border: 1px solid {t["grid"]}; border-left: 8px solid {accent}; border-radius: 8px; '
                                 f'background: {t["surface"]}; }}')
         self.open_box.setVisible(pos is None and not tr.stopped)
+        self.open_box.setTitle('Open your first position' if not tr.history else 'Open a position')
+        follow = doc.follow()
+        if doc.follow_rule == 'manual':
+            self.align.setText('Model check: not available, because you choose every entry yourself. Set "Later trades" to a model '
+                               'rule at setup if the Signal must match a backtest.')
+            self.align.setStyleSheet(f'color: {t["secondary"]};')
+        elif follow is None or not self.series:
+            self.align.setText(f'Model check: later trades follow {FOLLOW_TEXT[doc.follow_rule]}. It starts after your first entry.')
+            self.align.setStyleSheet(f'color: {t["secondary"]};')
+        else:
+            ok, message = engine.check_alignment(tr, prof, self.series.rows, follow)
+            mark = {True: '&#10003; Model check passed.', False: '&#10007; MODEL CHECK FAILED.', None: 'Model check:'}[ok]
+            self.align.setText(f'<b>{mark}</b> {e(message)}')
+            self.align.setStyleSheet(f'color: {t["critical"]}; font-weight: 600;' if ok is False else f'color: {t["secondary"]};')
 
         value = engine.mark_to_market(tr)
         open_note = ' including the open position' if pos is not None else ''
-        self.stats.setText(f'Account <b>{money(value, True)}</b>{open_note} ({value / tr.start - 1:+.1%} since the start at '
-                           f'{money(tr.start, True)}) · Wins in a row: <b>{tr.wins_row}</b> · '
+        self.stats.setText(f'Account <b>{money(value, True)}</b>{open_note} ({value / tr.total_in - 1:+.1%} on the {money(tr.total_in, True)} put in'
+                           f'{f", including {tr.topups} top-up deposit" + ("s" if tr.topups > 1 else "") if tr.topups else ""}) · Wins in a row: <b>{tr.wins_row}</b> · '
                            f'Size multiplier for the next trade: <b>{tr.mult:g}x</b>')
         fill_table(self.history, ['Entry', 'Exit', 'Side', 'Size', 'Lots', 'Move', 'Account after', 'Exit reason'],
                    [[h.entry_date, h.exit_date, side_text(h.direction), f'{h.size:g}x', h.lots, f'{h.move:+.2%}',

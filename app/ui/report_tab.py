@@ -18,7 +18,8 @@ from .widgets import (DISCLAIMER, Crosshair, ProfileEditor, SecurityPicker, Swit
 
 MAX_CURVES = 8
 FOLLOW = [('random_one', "Random long/short: one trader's story"), ('same', 'Same side as my entry'),
-          ('trend', 'Follow the 20-day trend'), ('random', f'Random long/short: median of {engine.MC_RUNS} traders')]
+          ('trend', 'Follow the 20-day trend'),
+          ('chase', f'Chase the last {engine.CHASE_DAYS} days (long after a rise, short after a fall)'), ('random', f'Random long/short: median of {engine.MC_RUNS} traders')]
 HORIZONS = [(252, '1 year (252 days)'), (126, '6 months (126 days)'), (63, '3 months (63 days)')]
 
 
@@ -78,8 +79,8 @@ class ReportTab(QWidget):
         form.addRow('Replay length', self.horizon)
 
         self.switches = SwitchBoxes()
-        for box in self.switches.boxes.values():
-            box.setChecked(True)                 # default: all four extra behaviours on
+        for key, _, _ in engine.SWITCHES:
+            self.switches.boxes[key].setChecked(True)     # default: the four original extras on; the newer two off
         sw_box = QGroupBox('Extra behaviours (applied to every profile)')
         QVBoxLayout(sw_box).addWidget(self.switches)
 
@@ -120,7 +121,7 @@ class ReportTab(QWidget):
         scroll.setWidget(left)
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setFixedWidth(370)
+        scroll.setMinimumWidth(240)
 
         self.title = QLabel('Account value by behaviour profile')
         self.title.setStyleSheet('font-size: 16px; font-weight: 600;')
@@ -200,12 +201,22 @@ class ReportTab(QWidget):
         split.setStretchFactor(1, 2)
         split.setSizes([560, 300])
 
-        right = QVBoxLayout()
+        right_w = QWidget()
+        right = QVBoxLayout(right_w)
+        right.setContentsMargins(0, 0, 0, 0)
         right.addWidget(split, 1)
         right.addWidget(disclaimer_label())
+        self.main_split = QSplitter(Qt.Horizontal)      # drag the divider to resize the input panel
+        self.main_split.addWidget(scroll)
+        self.main_split.addWidget(right_w)
+        self.main_split.setStretchFactor(0, 0)
+        self.main_split.setStretchFactor(1, 1)
+        self.main_split.setCollapsible(0, False)
+        self.main_split.setCollapsible(1, False)
+        self.main_split.setHandleWidth(8)
+        self.main_split.setSizes([430, 1050])
         lay = QHBoxLayout(self)
-        lay.addWidget(scroll)
-        lay.addLayout(right, 1)
+        lay.addWidget(self.main_split)
 
     def _add_curve_item(self, name, checked, tip=''):
         item = QListWidgetItem(name)
@@ -324,6 +335,7 @@ class ReportTab(QWidget):
         rnd = rep['follow'] == 'random'
         follow = {'same': 'same side as the entry', 'trend': 'following the 20-day trend',
                   'random_one': f'random long/short, one trader (number {rep["trader"]})',
+                  'chase': f'chasing the last {engine.CHASE_DAYS} days',
                   'random': f'random long/short, median of {rep["runs"]} runs'}[rep['follow']]
         extras = ', '.join(s.lower() for s in rep['results'][0]['profile'].switch_names()) or 'none'
         self.title.setText(f'{name}: {side.lower()} from {dates[0]} — account value by behaviour profile')
@@ -420,19 +432,22 @@ class ReportTab(QWidget):
             first = f'{engine.reason_label(ft.reason, ft.stop_moved)} on {ft.exit_date}'
             if rnd:
                 rows.append([r['name'], first, f'{ft.move:+.2%}', f'{r["ntr"]:.0f}', money(r['final'] * S),
-                             f'{r["lose"]:.0%}', f'{r["wiped"]:.0%}', money(r['opp_final'] * S), f'{r["opp_dd"]:.1%}'])
+                             f'{r["lose"]:.0%}', f'{r["wiped"]:.0%}', money(r['deposited'] * S),
+                             money(r['opp_final'] * S), f'{r["opp_dd"]:.1%}'])
             else:
                 rows.append([r['name'], first, f'{ft.move:+.2%}', r['ntr'], r['wins'], money(r['final'] * S),
-                             f'{r["final"] - 1:+.1%}', f'{r["dd"]:.1%}', 'Yes' if r['wiped'] else 'No',
-                             money(r['opp_final'] * S), f'{r["opp_final"] - 1:+.1%}', f'{r["opp_dd"]:.1%}'])
+                             f'{r["result"]:+.1%}', f'{r["dd"]:.1%}', 'Yes' if r['wiped'] else 'No',
+                             money(r['deposited'] * S), money(r['opp_final'] * S), f'{r["opp_final"] - 1:+.1%}', f'{r["opp_dd"]:.1%}'])
         if rnd:
             heads = ['Profile', 'Your first trade ended', 'First-trade move', 'Trades (average)', 'Median final account',
-                     'Runs losing', 'Runs wiped out', 'Opposite: median final', 'Opposite: median max drawdown']
-            right = (2, 3, 4, 5, 6, 7, 8)
+                     'Runs losing', 'Runs wiped out', 'Top-up deposits (average)', 'Opposite: median final',
+                     'Opposite: median max drawdown']
+            right = (2, 3, 4, 5, 6, 7, 8, 9)
         else:
             heads = ['Profile', 'Your first trade ended', 'First-trade move', 'Trades', 'Wins', 'Final account', 'Result',
-                     'Worst drawdown', 'Wiped out', 'Opposite: final', 'Opposite: result', 'Opposite: max drawdown']
-            right = (2, 3, 4, 5, 6, 7, 9, 10, 11)
+                     'Worst drawdown', 'Wiped out', 'Top-up deposits', 'Opposite: final', 'Opposite: result',
+                     'Opposite: max drawdown']
+            right = (2, 3, 4, 5, 6, 7, 9, 10, 11, 12)
         fill_table(self.results_table, heads, rows, right)
         self.results_table.selectRow(0)
         self._show_trades()
@@ -518,5 +533,6 @@ class ReportTab(QWidget):
                 f'{"<p class=mut>" + self.opp_readout.text() + "</p>" if self._opposite_mode() else ""}'
                 f'<img alt="Lower chart" src="data:image/png;base64,{self._png(self.price_plot)}"></div>'
                 f'<div class=card><h2>Results</h2><table><tr>{head_row}</tr>{body}</table><p class=mut>Wiped out = account at or '
-                f'below 20% of its starting value. Exits are taken at daily closes; costs are 2 basis points per side.</p></div>'
+                f'below 20% of its starting value. Result is measured against all money put in (start plus any top-up deposits). '
+                f'Exits are taken at daily closes; costs are 2 basis points per side.</p></div>'
                 f'{logs}<p class=mut><b>{e(DISCLAIMER)}</b></p>')
