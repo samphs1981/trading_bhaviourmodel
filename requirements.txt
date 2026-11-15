@@ -1,0 +1,6 @@
+PySide6>=6.5
+pyqtgraph>=0.13.3
+pytest>=7
+# Tests only: retail_sim_v2.py (the reference model) imports these.
+numpy
+pandas
