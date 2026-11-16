@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Retail Behaviour Model</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.min.css">
+<style>
+:root{
+  --page:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --secondary:#52514e; --muted:#898781; --grid:#e1e0d9; --axis:#c3c2b7;
+  --border:rgba(11,11,11,.12); --critical:#d03b3b; --accent:#2a78d6; --select:#e4eefb;
+  --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a; --s4:#eda100; --s5:#e87ba4; --s6:#008300; --s7:#6250d6; --s8:#e34948;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --page:#0d0d0d; --surface:#1a1a19; --ink:#f0efec; --secondary:#c3c2b7; --muted:#898781; --grid:#2c2c2a; --axis:#383835;
+    --border:rgba(255,255,255,.12); --critical:#e66767; --accent:#3987e5; --select:#1d3350;
+    --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500; --s5:#d55181; --s6:#008300; --s7:#9085e9; --s8:#e66767;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--page);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+header{padding:14px 16px 4px}
+h1{font-size:20px;margin:0}
+h2{font-size:15px;margin:0 0 4px}
+.sub{color:var(--secondary);font-size:13px;margin:2px 0 0}
+.layout{display:grid;grid-template-columns:340px minmax(0,1fr);gap:14px;padding:10px 16px 16px;align-items:start}
+@media (max-width: 900px){.layout{grid-template-columns:minmax(0,1fr)}}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:14px}
+label.f{display:block;font-size:12px;color:var(--secondary);margin:10px 0 3px}
+input[type=text],input[type=number],input[type=date],select{width:100%;padding:7px 8px;font:inherit;color:var(--ink);
+  background:var(--page);border:1px solid var(--border);border-radius:6px}
+fieldset{border:1px solid var(--border);border-radius:8px;margin:12px 0 0;padding:8px 10px}
+legend{font-size:12px;color:var(--secondary);padding:0 4px}
+label.c{display:block;padding:3px 0;cursor:pointer}
+label.c input{margin-right:6px}
+button{font:inherit;padding:9px 12px;border-radius:6px;border:1px solid var(--accent);background:var(--accent);color:#fff;
+  cursor:pointer;width:100%;margin-top:14px;font-weight:600}
+button:disabled{opacity:.55;cursor:wait}
+.status{font-size:13px;color:var(--secondary);margin-top:8px;min-height:18px}
+.status.err{color:var(--critical);font-weight:600}
+.chart{width:100%}
+.readout{font-size:13px;margin:6px 0 0;min-height:20px;color:var(--ink)}
+.readout i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:baseline}
+.readout span{white-space:nowrap;margin-right:14px;display:inline-block}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:6px}
+.row select{width:auto;max-width:100%}
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{padding:5px 8px;border-bottom:1px solid var(--grid);text-align:left;white-space:nowrap}
+th{color:var(--secondary);font-weight:600}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+tbody tr.pick{cursor:pointer}
+tbody tr.pick:hover{background:var(--select)}
+tbody tr.sel{background:var(--select)}
+.disc{color:var(--secondary);font-size:12px;margin:0 16px 18px}
+.hide{display:none}
+.u-over{cursor:crosshair}
+</style>
+</head>
+<body>
+<header>
+  <h1>Retail Behaviour Model</h1>
+  <p class="sub">If I had entered this security on this day, long or short, what would each behaviour profile have done to my account?</p>
+</header>
+
+<div class="layout">
+  <form class="card" id="form" autocomplete="off">
+    <label class="f" for="symbol">Security</label>
+    <select id="symbol"></select>
+    <label class="f" for="custom">or a Yahoo symbol</label>
+    <input type="text" id="custom" placeholder="e.g. WES.AX" maxlength="15">
+    <label class="f" for="date">Entry date</label>
+    <input type="date" id="date" required>
+    <label class="f" for="side">Side</label>
+    <select id="side"><option value="long">Long</option><option value="short">Short</option></select>
+    <label class="f" for="follow">Later trades</label>
+    <select id="follow"></select>
+    <label class="f" for="trader">Trader number (1 to 300; each is a different run of coin flips)</label>
+    <input type="number" id="trader" min="1" max="300" value="1">
+    <label class="f" for="start">Starting account ($)</label>
+    <input type="number" id="start" min="100" step="any" value="10000">
+    <label class="f" for="horizon">Replay length</label>
+    <select id="horizon"></select>
+    <fieldset><legend>Extra behaviours (applied to every profile)</legend><div id="switches"></div></fieldset>
+    <fieldset><legend>Curves to draw (up to 8)</legend><div id="curves"></div></fieldset>
+    <button id="run" type="submit">Run model</button>
+    <div class="status" id="status" role="status">Loading…</div>
+  </form>
+
+  <main>
+    <div class="card hide" id="out">
+      <h2 id="title"></h2>
+      <p class="sub" id="summary"></p>
+      <div class="chart" id="eq"></div>
+      <p class="readout" id="eqRead"></p>
+    </div>
+    <div class="card hide" id="lowerCard">
+      <div class="row">
+        <label for="lower" class="sub" style="margin:0">Lower chart</label>
+        <select id="lower">
+          <option value="opposite">Opposite positioning (mirror image: short when the profile is long, and vice versa)</option>
+          <option value="price">Price chart</option>
+        </select>
+      </div>
+      <h2 id="lowerTitle"></h2>
+      <div class="chart" id="lo"></div>
+      <p class="readout" id="loRead"></p>
+    </div>
+    <div class="card hide" id="resCard">
+      <h2>Results for all profiles <span class="sub">(select a row to see its trades)</span></h2>
+      <div class="scroll"><table id="results"></table></div>
+      <p class="sub">Wiped out = account at or below 20% of its starting value. Result is measured against all money put in
+        (start plus any top-up deposits). Exits are taken at daily closes; costs are 2 basis points per side.</p>
+    </div>
+    <div class="card hide" id="logCard">
+      <h2 id="logTitle">Trade log</h2>
+      <div class="scroll"><table id="log"></table></div>
+    </div>
+  </main>
+</div>
+<p class="disc" id="disc">Simulation for research only. Not financial advice. This app places no orders.</p>
+
+<script src="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.iife.min.js"></script>
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const MAX_CURVES = 8;
+let META = null, REP = null, charts = [], hoverIdx = null, picked = 0;
+
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const money = v => (v < 0 ? '-$' : '$') + Math.abs(v).toLocaleString('en-US', {maximumFractionDigits: 0});
+const pct = (v, d = 1, sign = true) => (sign && v >= 0 ? '+' : '') + (v * 100).toFixed(d) + '%';
+const priceText = v => { const a = Math.abs(v);
+  return a >= 100 ? v.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : (a >= 1 ? v.toFixed(3) : v.toFixed(5)); };
+const cssVar = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const seriesColors = () => [1,2,3,4,5,6,7,8].map(i => cssVar('--s' + i));
+
+function setStatus(text, err) { const s = $('status'); s.textContent = text; s.className = 'status' + (err ? ' err' : ''); }
+
+async function init() {
+  try {
+    META = await (await fetch('/api/meta')).json();
+  } catch (e) { setStatus('Could not reach the server. Reload the page to try again.', true); return; }
+  $('symbol').innerHTML = META.securities.map(s => `<option value="${esc(s.symbol)}">${esc(s.name)} (${esc(s.symbol)})</option>`).join('');
+  $('follow').innerHTML = META.follow.map(f => `<option value="${esc(f.key)}">${esc(f.label)}</option>`).join('');
+  $('horizon').innerHTML = META.horizons.map(h => `<option value="${h.days}">${esc(h.label)}</option>`).join('');
+  $('switches').innerHTML = META.switches.map(s =>
+    `<label class="c" title="${esc(s.tip)}"><input type="checkbox" data-key="${esc(s.key)}"${s.default ? ' checked' : ''}>${esc(s.label)}</label>`).join('');
+  $('curves').innerHTML = META.profiles.map(p =>
+    `<label class="c" title="${esc(p.describe)}"><input type="checkbox" data-name="${esc(p.name)}"${p.shown ? ' checked' : ''}>${esc(p.name)}</label>`).join('');
+  $('disc').textContent = META.disclaimer;
+  const d = new Date(); d.setFullYear(d.getFullYear() - 1);
+  while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() - 1);
+  $('date').value = d.toISOString().slice(0, 10);
+  $('follow').addEventListener('change', () => { $('trader').disabled = $('follow').value !== 'random_one'; });
+  $('curves').addEventListener('change', ev => {
+    if ($('curves').querySelectorAll('input:checked').length > MAX_CURVES) {
+      ev.target.checked = false; setStatus(`At most ${MAX_CURVES} curves can be drawn at once. Untick one first.`, true); return; }
+    if (REP) draw();
+  });
+  $('lower').addEventListener('change', () => { if (REP) draw(); });
+  $('form').addEventListener('submit', ev => { ev.preventDefault(); run(); });
+  window.addEventListener('resize', () => charts.forEach(c => c.u.setSize({width: c.el.clientWidth, height: c.h})));
+  setStatus('Pick a security, your entry date and side, then run the model.');
+}
+
+async function run() {
+  const body = {
+    symbol: ($('custom').value.trim() || $('symbol').value), date: $('date').value, side: $('side').value,
+    follow: $('follow').value, trader: Math.min(300, Math.max(1, parseInt($('trader').value, 10) || 1)),
+    start: parseFloat($('start').value) || 10000, horizon: parseInt($('horizon').value, 10), switches: {}};
+  $('switches').querySelectorAll('input').forEach(b => { body.switches[b.dataset.key] = b.checked; });
+  $('run').disabled = true;
+  setStatus(body.follow === 'random' ? `Replaying ${META.runs} traders for every profile. This can take up to a minute…` : 'Loading prices and replaying every profile…');
+  try {
+    const res = await fetch('/api/report', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const d = json.detail;
+      throw new Error(typeof d === 'string' ? d : (Array.isArray(d) && d[0] ? `Check the ${d[0].loc.slice(-1)[0]} field: ${d[0].msg}.` : 'The server could not run this request.'));
+    }
+    REP = json; picked = 0; hoverIdx = null;
+    ['out', 'lowerCard', 'resCard', 'logCard'].forEach(id => $(id).classList.remove('hide'));
+    draw(); fillResults();
+    setStatus(`${REP.note ? REP.note + ' ' : ''}${REP.source}; latest completed session ${REP.latest}.`);
+  } catch (e) { setStatus('Could not run: ' + e.message, true); }
+  finally { $('run').disabled = false; }
+}
+
+function shown() {
+  const names = [...$('curves').querySelectorAll('input:checked')].map(b => b.dataset.name);
+  const cols = seriesColors();
+  return REP.results.filter(r => names.includes(r.name)).slice(0, MAX_CURVES).map((r, n) => ({r, color: cols[n]}));
+}
+
+function makeChart(el, h, dates, lines, fmt, baseline, marker) {
+  el.innerHTML = '';
+  const xs = dates.map((_, i) => i);
+  const opts = {
+    width: el.clientWidth, height: h,
+    scales: {x: {time: false}, y: {range: (u, lo, hi) => {
+      if (baseline != null) { lo = Math.min(lo, baseline); hi = Math.max(hi, baseline); }
+      const pad = (hi - lo) * 0.06 || Math.abs(hi) * 0.02 || 1; return [lo - pad, hi + pad]; }}},
+    legend: {show: false},
+    cursor: {sync: {key: 'rbm'}, y: false, drag: {x: false, y: false}, points: {size: 7}},
+    series: [{}].concat(lines.map(l => ({label: l.name, stroke: l.color, width: 2, points: {show: false}}))),
+    axes: [
+      {stroke: cssVar('--muted'), grid: {show: false}, ticks: {stroke: cssVar('--axis'), width: 1},
+       values: (u, vals) => vals.map(v => (Number.isInteger(v) && dates[v]) ? dates[v] : '')},
+      {stroke: cssVar('--muted'), grid: {stroke: cssVar('--grid'), width: 1}, ticks: {show: false}, size: 78,
+       values: (u, vals) => vals.map(fmt)},
+    ],
+    hooks: {
+      setCursor: [u => { const i = u.cursor.idx; if (i !== hoverIdx) { hoverIdx = (i == null ? null : i); readouts(); } }],
+      draw: [u => {
+        const ctx = u.ctx, b = u.bbox; ctx.save();
+        if (baseline != null) {
+          const y = Math.round(u.valToPos(baseline, 'y', true)) + 0.5;
+          ctx.strokeStyle = cssVar('--muted'); ctx.lineWidth = 1; ctx.setLineDash([5 * devicePixelRatio, 4 * devicePixelRatio]);
+          ctx.beginPath(); ctx.moveTo(b.left, y); ctx.lineTo(b.left + b.width, y); ctx.stroke(); ctx.setLineDash([]);
+          ctx.fillStyle = cssVar('--muted'); ctx.font = `${11 * devicePixelRatio}px system-ui, sans-serif`; ctx.textAlign = 'right';
+          ctx.fillText('Start ' + money(baseline), b.left + b.width - 6 * devicePixelRatio, y - 5 * devicePixelRatio);
+        }
+        if (marker) {
+          const x = u.valToPos(0, 'x', true), y = u.valToPos(marker.value, 'y', true), s = 7 * devicePixelRatio, up = marker.long ? -1 : 1;
+          ctx.fillStyle = cssVar('--s1'); ctx.strokeStyle = cssVar('--surface'); ctx.lineWidth = 2 * devicePixelRatio;
+          ctx.beginPath(); ctx.moveTo(x, y + up * s); ctx.lineTo(x - s, y - up * s); ctx.lineTo(x + s, y - up * s); ctx.closePath(); ctx.stroke(); ctx.fill();
+          ctx.fillStyle = cssVar('--ink'); ctx.font = `${12 * devicePixelRatio}px system-ui, sans-serif`; ctx.textAlign = 'left';
+          ctx.fillText(marker.text, x + 12 * devicePixelRatio, y - 10 * devicePixelRatio);
+        }
+        ctx.restore();
+      }],
+    },
+  };
+  const u = new uPlot(opts, [xs].concat(lines.map(l => l.values)), el);
+  return {u, el, h};
+}
+
+function draw() {
+  charts.forEach(c => c.u.destroy()); charts = [];
+  const S = REP.start, rnd = REP.follow === 'random', side = REP.direction > 0 ? 'long' : 'short';
+  const follow = {same: 'same side as the entry', trend: 'following the 20-day trend', chase: 'chasing the last few days',
+    random_one: `random long/short, one trader (number ${REP.trader})`, random: `random long/short, median of ${REP.runs} traders`}[REP.follow];
+  const n = REP.dates.length, moved = REP.price[n - 1] / REP.price[0] - 1;
+  $('title').textContent = `${REP.name}: ${side} from ${REP.dates[0]} — account value by behaviour profile`;
+  $('summary').textContent = `${n - 1} trading days replayed, ${REP.dates[0]} to ${REP.dates[n - 1]}. Price moved ${pct(moved)}. Later trades: ${follow}. ` +
+    `Extra behaviours: ${REP.extras.join(', ') || 'none'}. Starting account ${money(S)}.` +
+    (rnd ? ' Each line is the median account across the traders; the first trade is the same for all of them.' : '');
+  const sh = shown();
+  charts.push(makeChart($('eq'), 300, REP.dates, sh.map(x => ({name: x.r.name, color: x.color, values: x.r.curve.map(v => v * S)})), money, S, null));
+  if ($('lower').value === 'opposite') {
+    $('lowerTitle').textContent = 'Account value if you took the opposite side of every trade' + (rnd ? ' (median of the traders)' : '');
+    charts.push(makeChart($('lo'), 220, REP.dates, sh.map(x => ({name: x.r.name, color: x.color, values: x.r.opp_curve.map(v => v * S)})), money, S, null));
+  } else {
+    $('lowerTitle').textContent = `${REP.name} daily close, with your entry marked`;
+    charts.push(makeChart($('lo'), 220, REP.dates, [{name: 'Close', color: cssVar('--secondary'), values: REP.price}], priceText, null,
+      {value: REP.price[0], long: REP.direction > 0, text: `Entry: ${side} at ${priceText(REP.price[0])}`}));
+  }
+  readouts();
+}
+
+function readouts() {
+  if (!REP) return;
+  const S = REP.start, last = REP.dates.length - 1, i = hoverIdx == null ? last : hoverIdx;
+  const lead = hoverIdx == null ? `Latest (${REP.dates[i]})` : REP.dates[i], sh = shown();
+  const sw = c => `<i style="background:${c}"></i>`;
+  $('eqRead').innerHTML = `<span><b>${lead}</b></span>` + sh.map(x => `<span>${sw(x.color)}${esc(x.r.name)} <b>${money(x.r.curve[i] * S)}</b></span>`).join('') +
+    `<span>Close <b>${priceText(REP.price[i])}</b></span>`;
+  if ($('lower').value === 'opposite') {
+    const dd = REP.follow === 'random' ? 'median max drawdown' : 'max drawdown';
+    $('loRead').innerHTML = `<span><b>Opposite side, ${lead}</b></span>` + sh.map(x =>
+      `<span>${sw(x.color)}${esc(x.r.name)} <b>${money(x.r.opp_curve[i] * S)}</b> (${dd} <b>${pct(x.r.opp_dd, 1, false)}</b>)</span>`).join('');
+  } else {
+    $('loRead').innerHTML = `<span><b>${lead}</b></span><span>Close <b>${priceText(REP.price[i])}</b></span>`;
+  }
+}
+
+function fillResults() {
+  const S = REP.start, rnd = REP.follow === 'random';
+  const heads = rnd
+    ? ['Profile', 'Your first trade ended', 'First-trade move', 'Trades (average)', 'Median final account', 'Traders losing', 'Traders wiped out',
+       'Top-up deposits (average)', 'Opposite: median final', 'Opposite: median max drawdown']
+    : ['Profile', 'Your first trade ended', 'First-trade move', 'Trades', 'Wins', 'Final account', 'Result', 'Worst drawdown', 'Wiped out',
+       'Top-up deposits', 'Opposite: final', 'Opposite: result', 'Opposite: max drawdown'];
+  const text = new Set(['Profile', 'Your first trade ended', 'Wiped out']);
+  const rows = REP.results.map(r => rnd
+    ? [r.name, `${r.first.reason} on ${r.first.exit}`, pct(r.first.move, 2), r.ntr.toFixed(0), money(r.final * S), pct(r.lose, 0, false),
+       pct(r.wiped, 0, false), money(r.deposited * S), money(r.opp_final * S), pct(r.opp_dd, 1, false)]
+    : [r.name, `${r.first.reason} on ${r.first.exit}`, pct(r.first.move, 2), r.ntr, r.wins, money(r.final * S), pct(r.result), pct(r.dd, 1, false),
+       r.wiped ? 'Yes' : 'No', money(r.deposited * S), money(r.opp_final * S), pct(r.opp_final - 1), pct(r.opp_dd, 1, false)]);
+  $('results').innerHTML = '<thead><tr>' + heads.map(h => `<th${text.has(h) ? '' : ' class="n"'}>${esc(h)}</th>`).join('') + '</tr></thead><tbody>' +
+    rows.map((row, k) => `<tr class="pick${k === picked ? ' sel' : ''}" data-k="${k}" tabindex="0">` +
+      row.map((v, c) => `<td${text.has(heads[c]) ? '' : ' class="n"'}>${esc(v)}</td>`).join('') + '</tr>').join('') + '</tbody>';
+  $('results').querySelectorAll('tr.pick').forEach(tr => {
+    const go = () => { picked = +tr.dataset.k; $('results').querySelectorAll('tr.sel').forEach(x => x.classList.remove('sel')); tr.classList.add('sel'); fillLog(); };
+    tr.addEventListener('click', go);
+    tr.addEventListener('keydown', ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); go(); } });
+  });
+  fillLog();
+}
+
+function fillLog() {
+  const r = REP.results[picked], S = REP.start;
+  if (!r.trades) {
+    $('logTitle').textContent = `Trade log: ${r.name} — not shown for the median view (each of the ${REP.runs} traders differs)`;
+    $('log').innerHTML = ''; return;
+  }
+  $('logTitle').textContent = `Trade log: ${r.name} — ${r.trades.length} trade${r.trades.length === 1 ? '' : 's'}`;
+  const heads = ['Entry', 'Exit', 'Side', 'Size', 'Lots', 'Move', 'Account after', 'Exit reason'], num = [3, 4, 5, 6];
+  $('log').innerHTML = '<thead><tr>' + heads.map((h, c) => `<th${num.includes(c) ? ' class="n"' : ''}>${h}</th>`).join('') + '</tr></thead><tbody>' +
+    r.trades.map(t => '<tr>' + [t.entry, t.exit, t.side, `${+t.size.toFixed(2)}x`, t.lots, pct(t.move, 2), money(t.account_after * S), t.reason]
+      .map((v, c) => `<td${num.includes(c) ? ' class="n"' : ''}>${esc(v)}</td>`).join('') + '</tr>').join('') + '</tbody>';
+}
+
+init();
+</script>
+</body>
+</html>

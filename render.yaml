@@ -1,0 +1,12 @@
+# Render blueprint: deploys the web version (FastAPI) from this repo.
+services:
+  - type: web
+    name: retail-behaviour-model
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements-web.txt
+    startCommand: uvicorn web.server:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
